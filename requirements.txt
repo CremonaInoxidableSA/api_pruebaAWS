@@ -1,0 +1,7 @@
+fastapi==0.104.1
+boto3==1.34.0
+uvicorn[standard]
+python-dotenv==1.0.0
+openpyxl
+aiosmtplib==3.0.0
+Pillow

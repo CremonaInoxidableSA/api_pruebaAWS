@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: api
+
+    restart: unless-stopped
+
+    ports:
+      - "8500:8500"
+
+    env_file:
+      - .env
+
+    volumes:
+      - /home/ec2-user/.aws:/root/.aws:ro

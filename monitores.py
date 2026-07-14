@@ -32,18 +32,38 @@ def convertir_dynamodb(item):
     return nuevo
 
 
+def convertir_dynamodb_sin_timestamp(item):
+    """Convierte formato de DynamoDB a JSON y elimina el campo timestamp."""
+    convertido = convertir_dynamodb(item)
+    if convertido and "timestamp" in convertido:
+        del convertido["timestamp"]
+    return convertido
+
+
 async def obtener_ultimo_registro(tabla_nombre, region):
-    """Obtiene el último registro (más reciente) de una tabla DynamoDB."""
+    """Obtiene el registro más reciente (por timestamp) de una tabla DynamoDB."""
     try:
         session = boto3.Session(region_name=region)
         dynamodb_client = session.client("dynamodb", region_name=region)
         
-        respuesta = dynamodb_client.scan(TableName=tabla_nombre, Limit=1)
+        # Escanear múltiples items para encontrar el más reciente por timestamp
+        respuesta = dynamodb_client.scan(TableName=tabla_nombre, Limit=100)
         items = respuesta.get("Items", [])
         
-        if items:
-            return items[0]
-        return None
+        if not items:
+            return None
+        
+        # Encontrar el item con el timestamp más reciente
+        ultimo_item = items[0]
+        ultima_fecha = ultimo_item.get("timestamp", {}).get("S", "")
+        
+        for item in items[1:]:
+            fecha = item.get("timestamp", {}).get("S", "")
+            if fecha > ultima_fecha:
+                ultimo_item = item
+                ultima_fecha = fecha
+        
+        return ultimo_item
     except Exception as e:
         print(f"Error obteniendo último registro de {tabla_nombre}: {e}")
         return None
@@ -59,17 +79,22 @@ async def obtener_ultimos_botones(tabla_nombre, region):
         respuesta = dynamodb_client.scan(TableName=tabla_nombre)
         
         for item in respuesta.get("Items", []):
-            numero_boton = item.get("numeroBoton", {}).get("N") or item.get("numeroBoton", {}).get("S")
-            if numero_boton is not None:
-                ultimos_botones[numero_boton] = item
+            numero_boton_field = item.get("numeroBoton")
+            if numero_boton_field and isinstance(numero_boton_field, dict):
+                # Extraer el valor del formato DynamoDB {"N": "2"} o {"S": "2"}
+                numero_boton = numero_boton_field.get("N") or numero_boton_field.get("S")
+                if numero_boton:
+                    ultimos_botones[numero_boton] = item
         
         # Continuar si hay más items
         while "LastEvaluatedKey" in respuesta:
             respuesta = dynamodb_client.scan(TableName=tabla_nombre, ExclusiveStartKey=respuesta["LastEvaluatedKey"])
             for item in respuesta.get("Items", []):
-                numero_boton = item.get("numeroBoton", {}).get("N") or item.get("numeroBoton", {}).get("S")
-                if numero_boton is not None:
-                    ultimos_botones[numero_boton] = item
+                numero_boton_field = item.get("numeroBoton")
+                if numero_boton_field and isinstance(numero_boton_field, dict):
+                    numero_boton = numero_boton_field.get("N") or numero_boton_field.get("S")
+                    if numero_boton:
+                        ultimos_botones[numero_boton] = item
         
         return list(ultimos_botones.values()) if ultimos_botones else []
     except Exception as e:
@@ -121,7 +146,7 @@ async def monitorear_tabla_tiemporeal(tabla_nombre, region, clientes):
                     print(f"Nuevos clientes detectados en {tabla_nombre}: {len(clientes_nuevos)}")
                     ultimo_registro = await obtener_ultimo_registro(tabla_nombre, region)
                     if ultimo_registro:
-                        ultimo_registro_convertido = convertir_dynamodb(ultimo_registro)
+                        ultimo_registro_convertido = convertir_dynamodb_sin_timestamp(ultimo_registro)
                         for websocket in clientes_nuevos.copy():
                             try:
                                 print(f"Enviando último registro a cliente en {tabla_nombre}")
@@ -142,7 +167,7 @@ async def monitorear_tabla_tiemporeal(tabla_nombre, region, clientes):
                         for evento in respuesta.get("Records", []):
                             if evento["eventName"] in ["INSERT", "MODIFY"]:
                                 datos = evento["dynamodb"].get("NewImage", {})
-                                datos_convertidos = convertir_dynamodb(datos)
+                                datos_convertidos = convertir_dynamodb_sin_timestamp(datos)
                                 
                                 for websocket in clientes.copy():
                                     try:
@@ -196,9 +221,11 @@ async def monitorear_tabla_botones(tabla_nombre, region, clientes):
         # Obtener los botones iniciales
         botones_iniciales = await obtener_ultimos_botones(tabla_nombre, region)
         for boton in botones_iniciales:
-            numero_boton = boton.get("numeroBoton")
-            if numero_boton is not None:
-                ultimos_botones[numero_boton] = boton
+            numero_boton_field = boton.get("numeroBoton")
+            if numero_boton_field and isinstance(numero_boton_field, dict):
+                numero_boton = numero_boton_field.get("N") or numero_boton_field.get("S")
+                if numero_boton:
+                    ultimos_botones[numero_boton] = boton
         
         while True:
             try:
@@ -221,12 +248,11 @@ async def monitorear_tabla_botones(tabla_nombre, region, clientes):
                 clientes_nuevos = clientes - clientes_notificados
                 if clientes_nuevos:
                     print(f"Nuevos clientes detectados en {tabla_nombre}: {len(clientes_nuevos)}")
-                    botones_convertidos = [convertir_dynamodb(b) for b in ultimos_botones.values()]
+                    botones_convertidos = [convertir_dynamodb_sin_timestamp(b) for b in ultimos_botones.values()]
                     for websocket in clientes_nuevos.copy():
                         try:
                             print(f"Enviando {len(botones_convertidos)} botones a cliente en {tabla_nombre}")
-                            for boton_data in botones_convertidos:
-                                await websocket.send_json(boton_data)
+                            await websocket.send_json(botones_convertidos)
                             clientes_notificados.add(websocket)
                         except Exception as e:
                             print(f"Error enviando a cliente: {e}")
@@ -243,19 +269,23 @@ async def monitorear_tabla_botones(tabla_nombre, region, clientes):
                         for evento in respuesta.get("Records", []):
                             if evento["eventName"] in ["INSERT", "MODIFY"]:
                                 datos = evento["dynamodb"].get("NewImage", {})
-                                numero_boton = datos.get("numeroBoton", {}).get("N") if isinstance(datos.get("numeroBoton", {}), dict) else datos.get("numeroBoton")
+                                numero_boton_field = datos.get("numeroBoton")
+                                
+                                # Extraer el número de botón del formato DynamoDB
+                                numero_boton = None
+                                if numero_boton_field and isinstance(numero_boton_field, dict):
+                                    numero_boton = numero_boton_field.get("N") or numero_boton_field.get("S")
                                 
                                 # Actualizar el último estado de este botón
-                                if numero_boton is not None:
+                                if numero_boton:
                                     ultimos_botones[numero_boton] = datos
                                 
-                                # Enviar TODOS los estados actualizados de botones a todos los clientes
-                                botones_convertidos = [convertir_dynamodb(b) for b in ultimos_botones.values()]
+                                # Enviar TODOS los estados actualizados de botones a todos los clientes (en un solo mensaje)
+                                botones_convertidos = [convertir_dynamodb_sin_timestamp(b) for b in ultimos_botones.values()]
                                 
                                 for websocket in clientes.copy():
                                     try:
-                                        for boton_data in botones_convertidos:
-                                            await websocket.send_json(boton_data)
+                                        await websocket.send_json(botones_convertidos)
                                     except:
                                         clientes.discard(websocket)
                                         clientes_notificados.discard(websocket)

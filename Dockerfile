@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV TZ=America/Mexico_City
+ENV TZ=America/Argentina/Buenos_Aires
 
 WORKDIR /app
 
